@@ -1,6 +1,19 @@
 {
+  "$schema": "node_modules/wrangler/config-schema.json",
   "name": "avito-ai-studio",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
-  "workers_dev": true
+  "workers_dev": true,
+  // Секреты и переменные задаются в Cloudflare → Settings → Variables and Secrets и не стираются при деплое
+  "keep_vars": true,
+  "observability": { "enabled": true },
+
+  // База и очередь задач бота: Durable Object с SQLite (есть на бесплатном тарифе)
+  "durable_objects": {
+    "bindings": [{ "name": "BOT", "class_name": "BotDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BotDO"] }],
+
+  // Раз в 10 минут: очистка черновиков и выгрузка на Авито
+  "triggers": { "crons": ["*/10 * * * *"] }
 }

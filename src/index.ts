@@ -1,79 +1,152 @@
-interface Env {
-  TELEGRAM_BOT_TOKEN: string;
-  TELEGRAM_WEBHOOK_SECRET: string;
-  ADMIN_TELEGRAM_ID?: string;
+/**
+ * Avito AI Studio — Telegram-бот на Cloudflare Workers.
+ *
+ * Адреса Worker:
+ *   GET  /          — проверка: что настроено, что нет
+ *   GET  /setup     — подключить бота к Telegram (webhook) — открыть один раз после деплоя
+ *   POST /telegram  — сюда Telegram присылает сообщения
+ *   GET  /m/…       — фото для Telegram и Авито
+ *   GET  /feed/…    — файл выгрузки для Автозагрузки Авито
+ */
+import type { Env } from "./env";
+import { hasImages, isAutoload, setting } from "./env";
+import { Telegram, TgUpdate } from "./telegram";
+import { esc, sha256hex } from "./util";
+
+export { BotDO } from "./bot";
+
+const stub = (env: Env) => env.BOT.get(env.BOT.idFromName("main"));
+
+async function hookSecret(env: Env): Promise<string> {
+  const own = setting(env, "TELEGRAM_WEBHOOK_SECRET");
+  if (/^[A-Za-z0-9_-]{1,256}$/.test(own)) return own;
+  return (await sha256hex("webhook:" + env.TELEGRAM_BOT_TOKEN)).slice(0, 48);
 }
-type Button = { text: string; callback_data: string };
-type Message = { chat: { id: number }; from?: { id: number }; text?: string };
-type Callback = { id: string; from: { id: number }; message?: Message; data?: string };
-type Update = { update_id: number; message?: Message; callback_query?: Callback };
-const menu: Button[][] = [
-  [{ text: "📸 Новое объявление", callback_data: "new" }],
-  [{ text: "📋 Мои объявления", callback_data: "list" }],
-  [{ text: "💬 Ответ покупателю", callback_data: "reply" }],
-  [{ text: "🔗 Подключить Авито", callback_data: "avito" }],
-  [{ text: "⚙️ Настройки", callback_data: "settings" }]
-];
-const welcome = "👋 Добро пожаловать в Avito AI Studio!\n\nЯ помощник для подготовки объявлений на Авито: карточки одежды, студийные фото, ответы покупателям и управление объявлениями.\n\n⚠️ Сейчас запущена стартовая версия. Генерация фото, ИИ-ответы, синхронизация с Авито и публикация будут подключены отдельно. Ничего на Авито автоматически не отправляется.\n\nВыбери действие 👇";
-async function api(env: Env, method: string, payload: Record<string, unknown>): Promise<void> {
-  const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
-  });
-  if (!response.ok) throw new Error(`Telegram ${method}: ${response.status}`);
+
+function page(title: string, body: string, status = 200): Response {
+  return new Response(
+    `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+      `<title>${esc(title)}</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:720px;margin:32px auto;padding:0 16px;color:#1d1d1f}` +
+      `li{margin:6px 0}code{background:#f2f2f2;padding:1px 4px;border-radius:4px}.ok{color:#137333}.bad{color:#b3261e}</style></head>` +
+      `<body><h1>${esc(title)}</h1>${body}</body></html>`,
+    { status, headers: { "content-type": "text/html; charset=utf-8" } },
+  );
 }
-async function send(env: Env, chatId: number, text: string, buttons?: Button[][]) {
-  await api(env, "sendMessage", {chat_id: chatId, text, ...(buttons ? {reply_markup:{inline_keyboard:buttons}} : {})});
+
+const mark = (ok: boolean, text: string) => `<li class="${ok ? "ok" : "bad"}">${ok ? "✅" : "❌"} ${text}</li>`;
+
+async function statusPage(env: Env, origin: string): Promise<Response> {
+  const items: string[] = [];
+  let webhookOk = false;
+  if (!env.TELEGRAM_BOT_TOKEN) {
+    items.push(mark(false, "Нет секрета <code>TELEGRAM_BOT_TOKEN</code>"));
+  } else {
+    const tg = new Telegram(env.TELEGRAM_BOT_TOKEN);
+    try {
+      const me = await tg.call<{ username: string }>("getMe");
+      items.push(mark(true, `Токен Telegram работает: @${esc(me.username)}`));
+      const info = await tg.call<{ url: string; last_error_message?: string; pending_update_count?: number }>("getWebhookInfo");
+      webhookOk = info.url === `${origin}/telegram`;
+      items.push(mark(webhookOk, webhookOk
+        ? "Бот подключён к этому Worker"
+        : `Бот не подключён к этому Worker — откройте <a href="/setup">/setup</a>`));
+      if (info.last_error_message) items.push(mark(false, `Последняя ошибка доставки от Telegram: ${esc(info.last_error_message)}`));
+    } catch (e) {
+      items.push(mark(false, `Токен Telegram не подходит: ${esc(String(e))}. Обновите секрет <code>TELEGRAM_BOT_TOKEN</code>.`));
+    }
+  }
+  items.push(mark(Boolean(setting(env, "ANTHROPIC_API_KEY")), "Ключ Claude <code>ANTHROPIC_API_KEY</code> (тексты и цена)"));
+  items.push(mark(hasImages(env), "Ключ OpenAI <code>OPENAI_API_KEY</code> (фото нейросетью; без него — ваши фото как есть)"));
+  if (isAutoload(env)) {
+    for (const key of ["AVITO_CLIENT_ID", "AVITO_CLIENT_SECRET", "AVITO_ADDRESS"] as const) {
+      items.push(mark(Boolean(setting(env, key)), `<code>${key}</code> для автопубликации на Авито`));
+    }
+  } else {
+    items.push(`<li>ℹ️ Публикация: готовый пакет, выкладываете вы (<code>PUBLISH_MODE</code> = manual)</li>`);
+  }
+  try {
+    const st = await stub(env).stats();
+    items.push(`<li>📦 В базе: владельцев ${st.owners}, локаций ${st.studios}, объявлений ${st.items}, задач в очереди ${st.jobs}</li>`);
+  } catch (e) {
+    items.push(mark(false, `База не отвечает: ${esc(String(e))}`));
+  }
+  return page("Avito AI Studio", `<ul>${items.join("")}</ul>` + (webhookOk ? "<p>Всё готово — напишите боту /start.</p>" : ""));
 }
-async function handle(env: Env, update: Update) {
-  const callback = update.callback_query;
-  const msg = update.message ?? callback?.message;
-  const uid = update.message?.from?.id ?? callback?.from.id;
-  if (!msg || !uid) return;
-  if (callback) await api(env, "answerCallbackQuery", {callback_query_id:callback.id});
-  const adminId = Number(env.ADMIN_TELEGRAM_ID);
-  if (!env.ADMIN_TELEGRAM_ID || !Number.isSafeInteger(adminId) || adminId <= 0) {
-    await send(env, msg.chat.id, `🔐 Для запуска укажи ADMIN_TELEGRAM_ID в Cloudflare Secrets. Твой Telegram ID: ${uid}. Не сообщай токены в чат.`);
-    return;
-  }
-  if (uid !== adminId) {
-    await send(env, msg.chat.id, "⛔ Этот бот настроен для личного использования.");
-    return;
-  }
-  const action = callback?.data ?? update.message?.text?.trim() ?? "";
-  if (action === "/start" || action === "/menu" || action === "menu") {
-    await send(env, msg.chat.id, welcome, menu); return;
-  }
-  const back: Button[][] = [[{text:"⬅️ Главное меню",callback_data:"menu"}]];
-  switch(action) {
-    case "new":
-      await send(env,msg.chat.id,"📸 Новое объявление\n\nВ следующем этапе здесь появятся загрузка фотографий товара, выбор ИИ-модели или собственного фото, новая студия для каждого объявления и согласование готовой карточки. Сейчас создание объявлений ещё не активно.",back);break;
-    case "list":
-      await send(env,msg.chat.id,"📋 Мои объявления\n\nПодключение к базе и API Авито ещё не завершено. Статусы, сообщения и счётчики пока недоступны — реальные данные не подменяются демонстрационными.",back);break;
-    case "reply":
-      await send(env,msg.chat.id,"💬 Ответ покупателю\n\nПо согласованным правилам: автоответы на простые вопросы включены; самостоятельные скидки запрещены; уведомления обо всех сообщениях. Для реальной работы нужно подключить Avito Messenger API и ИИ.",back);break;
-    case "avito":
-      await send(env,msg.chat.id,"🔗 Подключение Авито\n\nАвторизацию аккаунта подключим только через официальные методы Авито после проверки доступности API. Не отправляй логин, пароль и SMS-коды боту.",back);break;
-    case "settings":
-      await send(env,msg.chat.id,"⚙️ Настройки\n\n✅ Автоответы на простые вопросы: включены (после подключения API)\n🚫 Самостоятельные скидки: запрещены\n🔔 Уведомления: обо всех сообщениях\n\nЭто запланированные настройки; интеграция пока не запущена.",back);break;
-    default:
-      await send(env,msg.chat.id,"Используй /start, чтобы открыть главное меню.",menu);
+
+async function setup(env: Env, origin: string): Promise<Response> {
+  if (!env.TELEGRAM_BOT_TOKEN) return page("Настройка", "<p class=bad>Сначала добавьте секрет <code>TELEGRAM_BOT_TOKEN</code>.</p>", 400);
+  const tg = new Telegram(env.TELEGRAM_BOT_TOKEN);
+  try {
+    await tg.call("setWebhook", {
+      url: `${origin}/telegram`,
+      secret_token: await hookSecret(env),
+      allowed_updates: ["message", "callback_query"],
+      drop_pending_updates: true,
+      max_connections: 10,
+    });
+    await tg.call("setMyCommands", {
+      commands: [
+        { command: "new", description: "Новая вещь" },
+        { command: "list", description: "Мои объявления" },
+        { command: "studios", description: "Локации студии" },
+        { command: "feed", description: "Ссылка на фид для Авито" },
+        { command: "cancel", description: "Отменить текущую вещь" },
+        { command: "help", description: "Помощь" },
+      ],
+    });
+    const me = await tg.call<{ username: string }>("getMe");
+    return page("Бот подключён",
+      `<p class=ok>✅ @${esc(me.username)} теперь работает через этот Worker.</p>` +
+      `<p>Откройте бота в Telegram и отправьте <code>/start</code>. Первый, кто напишет, станет владельцем.</p>` +
+      `<p><a href="/">Проверить настройки</a></p>`);
+  } catch (e) {
+    return page("Ошибка подключения", `<p class=bad>${esc(String(e))}</p><p>Проверьте секрет <code>TELEGRAM_BOT_TOKEN</code>.</p>`, 500);
   }
 }
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/") return new Response("Avito AI Studio Worker: online", {status:200});
-    if (request.method !== "POST" || url.pathname !== "/telegram") return new Response("Not found",{status:404});
-    if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET) return new Response("Not configured",{status:503});
-    if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.TELEGRAM_WEBHOOK_SECRET)
-      return new Response("Forbidden",{status:403});
-    try {
-      const update = await request.json() as Update;
-      await handle(env, update);
+    const origin = url.origin;
+    const path = url.pathname;
+
+    if (request.method === "POST" && path === "/telegram") {
+      if (!env.TELEGRAM_BOT_TOKEN) return new Response("Not configured", { status: 503 });
+      if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== (await hookSecret(env))) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      try {
+        const update = (await request.json()) as TgUpdate;
+        await stub(env).handleUpdate(update, origin);
+      } catch (e) {
+        // Отвечаем 200 в любом случае, иначе Telegram будет бесконечно повторять то же сообщение
+        console.error("Ошибка обработки сообщения", e);
+      }
       return new Response("OK");
-    } catch (error) {
-      console.error("Telegram update failed",error);
-      return new Response("Processing failed",{status:500});
     }
-  }
+
+    if (request.method === "GET") {
+      if (path === "/" || path === "") return statusPage(env, origin);
+      if (path === "/setup") return setup(env, origin);
+
+      const media = path.match(/^\/m\/([\w-]+)\/([\w-]+)\.jpg$/);
+      if (media) {
+        const img = await stub(env).getMedia(media[1], media[2]);
+        if (!img) return new Response("Not found", { status: 404 });
+        return new Response(img.data, { headers: { "content-type": img.mime, "cache-control": "public, max-age=86400" } });
+      }
+
+      const feed = path.match(/^\/feed\/([\w-]+)\.xml$/);
+      if (feed) {
+        const xml = await stub(env).feed(feed[1]);
+        if (xml === null) return new Response("Not found", { status: 404 });
+        return new Response(xml, { headers: { "content-type": "application/xml; charset=utf-8" } });
+      }
+    }
+    return new Response("Not found", { status: 404 });
+  },
+
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(stub(env).cron());
+  },
 } satisfies ExportedHandler<Env>;

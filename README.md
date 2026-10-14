@@ -1,42 +1,79 @@
-# Avito AI Studio — Telegram bot on Cloudflare Workers
+# Avito AI Studio
 
-This is the **first runnable milestone**, not the completed Avito integration. It handles the Telegram webhook, /start, interactive main menu and owner-only access. Avito API, AI-generated images and texts, product storage, and message synchronization are planned but are **not working yet**.
+Telegram-бот @AvitoAIStudio_Bot на Cloudflare Workers. Сценарий: студия → фото вещи → бирка → что за товар. Дальше бот рисует фото вещи в вашей студии нейросетью, пишет заголовок и описание, предлагает цену. Всё можно поправить кнопками: «Давай я сам переделаю» или «Введу своё». После итогового согласования бот публикует объявление.
 
-## Deploy
+## Как устроено
 
-Cloudflare Workers & Pages → `avito-ai-studio` → connect GitHub repository `vbobr31/avito-ai-studio` (branch `main`).
+| Часть | Чем сделано |
+| --- | --- |
+| Приём сообщений | Worker, адрес `/telegram` (webhook) |
+| База, фото, очередь задач | Durable Object с SQLite — есть на бесплатном тарифе, отдельно создавать ничего не нужно |
+| Тексты, разбор вещи, цена | Claude API |
+| Фото в студии и на модели | OpenAI Images (`images/edits`) |
+| Публикация | `manual` — готовый пакет вам; `autoload` — Автозагрузка Авито (нужен профиль-компания с подпиской) |
+| Выгрузка на Авито и очистка | Cron раз в 10 минут |
 
-Build command: `npm run check` (or leave empty for the first test).
-Deploy command: `npx wrangler deploy`.
-Root directory: `/`. Node.js 20+.
+## Запуск
 
-In **Settings → Variables and Secrets → Production**, set these as **Secret**, never as public/plain variables:
+1. **Сборка.** Код в ветке `main`, Cloudflare собирает его сам: Workers & Pages → `avito-ai-studio` → Deployments. Если сборка не запустилась, нажмите Retry build. Build command оставьте пустым, Deploy command — `npx wrangler deploy`.
+2. **Секреты.** Settings → Variables and Secrets → Add, тип **Secret**:
 
-- `TELEGRAM_BOT_TOKEN`: token from @BotFather
-- `TELEGRAM_WEBHOOK_SECRET`: a long random string consisting of `A-Z`, `a-z`, `0-9`, `_`, `-` (e.g. generate locally)
-- `ADMIN_TELEGRAM_ID`: the owner's numeric Telegram user ID, not the bot username
+    | Имя | Что вписать | Нужно |
+    | --- | --- | --- |
+    | `TELEGRAM_BOT_TOKEN` | токен от @BotFather. Если получали новый — замените старое значение | да |
+    | `ANTHROPIC_API_KEY` | ключ Claude (console.anthropic.com → API Keys) | да |
+    | `OPENAI_API_KEY` | ключ OpenAI (platform.openai.com → API keys) | для фото нейросетью |
 
-Deploy, then open your Worker URL root, which should say `Avito AI Studio Worker: online`.
+    Остальные секреты необязательны (таблица ниже).
+3. **Подключить бота.** Откройте `https://avito-ai-studio.<ваш-поддомен>.workers.dev/setup` — бот подключится к Telegram.
+4. **Проверка.** Откройте `https://avito-ai-studio.<ваш-поддомен>.workers.dev/`. Страница показывает, что настроено, а что нет.
+5. **Старт.** Напишите боту `/start`. Первый, кто напишет, станет владельцем. Коллеге доступ выдаётся командой `/adduser ID`. Если задан `ADMIN_TELEGRAM_ID`, доступ есть только у этого ID (и у тех, кого добавили через `/adduser`).
 
-Register the webhook **from your own local terminal**, with your own secret values. Do not post a real token in screenshots, logs or chat.
+## Необязательные настройки (тоже Secret)
 
-```bash
-curl -sS -X POST "https://api.telegram.org/botYOUR_BOT_TOKEN/setWebhook" \
-  --data-urlencode "url=https://avito-ai-studio.YOUR_SUBDOMAIN.workers.dev/telegram" \
-  --data-urlencode "secret_token=YOUR_TELEGRAM_WEBHOOK_SECRET" \
-  --data-urlencode 'allowed_updates=["message","callback_query"]'
+| Имя | По умолчанию | Что делает |
+| --- | --- | --- |
+| `PHOTO_STYLE` | `ai_studio` | `ai_studio` — вещь в студии, `ai_model` — на модели, `original` — ваши фото без обработки. Для конкретной вещи меняется кнопкой |
+| `AI_MAX_IMAGES` | `3` | сколько фото рисовать на вещь (до 6) |
+| `IMAGE_MODEL` | `gpt-image-2.5-sunburst` | модель картинок OpenAI |
+| `IMAGE_QUALITY` | `high` | `low`, `medium`, `high` — дешевле/быстрее или лучше |
+| `KEEP_ORIGINAL_PHOTOS` | `1` | добавлять в конец 1–2 исходных фото вещи (`0` — нет) |
+| `CLAUDE_MODEL` | `claude-sonnet-5-5` | модель для текстов |
+| `DESCRIPTION_FOOTER` | доставка, оригинальность, замеры | постоянный блок в конце описания; перенос строки — `\n` |
+| `PRICE_RULES` | — | ваши правила цены: минимум, наценка, округление |
+| `ADMIN_TELEGRAM_ID`, `ALLOWED_USERS` | — | кому можно пользоваться ботом (ID через запятую) |
+| `PUBLISH_MODE` | `manual` | `autoload` — бот сам выкладывает на Авито |
+| `AVITO_CLIENT_ID`, `AVITO_CLIENT_SECRET` | — | Авито → Настройки → Avito API (для `autoload`) |
+| `AVITO_ADDRESS` | — | адрес в объявлениях полностью, как на Авито (для `autoload`) |
+| `AVITO_PHONE`, `AVITO_LISTING_FEE` | — | телефон; откуда платить за размещение: `Package`, `Single`, `PackageSingle` |
+
+## Автопубликация на Авито
+
+1. Профиль-компания и подписка «Расширенный» или «Максимальный» — без неё в кабинете нет раздела «Автозагрузка».
+2. Секреты `PUBLISH_MODE=autoload`, `AVITO_CLIENT_ID`, `AVITO_CLIENT_SECRET`, `AVITO_ADDRESS`.
+3. Напишите боту `/feed`, вставьте ссылку в Авито → Автозагрузка → Настройки, отметьте все часы в расписании.
+4. Авито принимает выгрузку не чаще раза в час, поэтому публикация занимает до часа. Ссылку на объявление или ошибку бот пришлёт сам.
+
+Поля категории «Одежда, обувь, аксессуары» — в `src/fields.ts`. Авито иногда меняет шаблоны: сверяйте с [шаблоном категории](https://www.avito.ru/autoload/documentation/templates).
+
+## Ограничения
+
+- Фото присылайте обычными фото, не файлами: в базе ограничение 2 МБ на картинку.
+- Нейросеть рисует, а не фотографирует: принт, логотип или фактура могут чуть отличаться. Проверяйте фото перед публикацией. Исходные фото по умолчанию добавляются в конец объявления.
+- Если нейросеть не ответила, бот пишет почему и берёт ваши исходные фото.
+- Черновики, не доведённые до публикации, удаляются через 7 дней.
+
+## Файлы
+
+```
+src/index.ts      адреса Worker: /telegram, /setup, проверка, фото, фид; cron
+src/bot.ts        сценарий диалога, база, очередь задач (Durable Object)
+src/ai.ts         Claude: разбор вещи, тексты, цена
+src/images.ts     OpenAI: фото в студии и на модели
+src/avito.ts      фид и API Автозагрузки
+src/fields.ts     поля категории Авито
+src/keyboards.ts  кнопки
+src/telegram.ts   Telegram API
 ```
 
-After this, send `/start` to `@AvitoAIStudio_Bot`. If no response, check Worker logs and Telegram `getWebhookInfo`.
-
-## Agreed business rules (future Avito integration)
-
-- Basic questions: automated response only when verified information is available
-- Discounts: never offered automatically; require owner approval
-- Notifications: every incoming and outgoing message
-- Studio photos: fresh per listing; option for generated model, own model photo, or no model
-- Publishing to Avito: only on explicit approval and if authorized by official Avito APIs
-
-## Security
-
-No API secrets in GitHub. Restrict access with `ADMIN_TELEGRAM_ID`. Do not change or delete other Cloudflare Workers. Do not claim Avito publication without API confirmation.
+Секреты не храните в GitHub — только в Cloudflare.
