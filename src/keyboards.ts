@@ -33,7 +33,10 @@ export function editModeKb(id: string, field: string, aiImages: boolean): Keyboa
       rows.push([{ text: "🎨 Нейросеть: вещь в студии", callback_data: `sty:${id}:ai_studio` }]);
       rows.push([{ text: "👗 Нейросеть: вещь на модели", callback_data: `sty:${id}:ai_model` }]);
     }
-    rows.push([{ text: "📷 Только мои фото, без обработки", callback_data: `sty:${id}:original` }]);
+    rows.push([{ text: "🔁 Заменить одно фото своим", callback_data: `ph:${id}:replace` }]);
+    rows.push([{ text: "🗑 Убрать одно фото", callback_data: `ph:${id}:remove` }]);
+    rows.push([{ text: "📎 Свои готовые фото вместо всех", callback_data: `ph:${id}:own` }]);
+    rows.push([{ text: "📷 Исходные фото, без обработки", callback_data: `sty:${id}:original` }]);
     rows.push([{ text: "📷 Пришлю новые фото товара", callback_data: `em:${id}:photos:manual` }]);
     rows.push([{ text: "📍 Другая локация студии", callback_data: `em:${id}:photos:studio` }]);
   } else {
@@ -49,6 +52,14 @@ export function optionsKb(id: string, field: string, options: string[]): Keyboar
   const rows: Keyboard = [];
   for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
   rows.push([{ text: "⬅️ Назад", callback_data: `ef:${id}:${field}` }]);
+  return rows;
+}
+
+export function photoNumbersKb(id: string, mode: string, count: number): Keyboard {
+  const buttons = Array.from({ length: Math.min(count, 10) }, (_, i) => ({ text: String(i + 1), callback_data: `phn:${id}:${mode}:${i}` }));
+  const rows: Keyboard = [];
+  for (let i = 0; i < buttons.length; i += 5) rows.push(buttons.slice(i, i + 5));
+  rows.push([{ text: "⬅️ Назад", callback_data: `ef:${id}:photos` }]);
   return rows;
 }
 

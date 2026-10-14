@@ -27,6 +27,7 @@ const ST = {
 } as const;
 
 const STYLE_NAMES: Record<string, string> = {
+  own: "ваши готовые фото",
   cutout: "вещь вырезана и поставлена в студию",
   ai_studio: "нейросеть: вещь в студии",
   ai_model: "нейросеть: вещь на модели",
@@ -321,6 +322,12 @@ export class BotDO extends DurableObject<Env> {
       case "manual":
         if (text) return this.manualValue(chat, s, text);
         break;
+      case "own_photos":
+        if (hasImage) return this.productPhoto(m, s, "own_new");
+        break;
+      case "replace_photo":
+        if (hasImage) return this.replacePhoto(m, s);
+        break;
     }
     const hints: Record<string, string> = {
       studio: "Пришлите фото студии или выберите локацию кнопкой.",
@@ -331,6 +338,8 @@ export class BotDO extends DurableObject<Env> {
       info: "Напишите текстом: название, бренд, размер.",
       wish: "Напишите пожелание текстом или нажмите кнопку.",
       manual: "Напишите новое значение текстом.",
+      own_photos: "Пришлите свои готовые фото или нажмите «Готово».",
+      replace_photo: "Пришлите одно фото, которым заменить выбранное.",
     };
     await this.tg.send(chat, hints[s.state] ?? "Новая вещь — /new, список — /list, помощь — /help");
   }
@@ -422,10 +431,11 @@ export class BotDO extends DurableObject<Env> {
       K.photosDoneKb());
   }
 
-  private async productPhoto(m: TgMessage, s: Session): Promise<void> {
+  private async productPhoto(m: TgMessage, s: Session, kind: "src" | "own_new" = "src"): Promise<void> {
     if (!s.item_id) return this.startNew(m.chat.id, s);
-    if (this.mediaIds(s.item_id, "src").length >= MAX_SRC_PHOTOS) {
-      await this.tg.send(m.chat.id, `Хватит ${MAX_SRC_PHOTOS} фото. Нажмите «Готово».`, K.photosDoneKb());
+    const limit = kind === "own_new" ? MAX_IMAGES : MAX_SRC_PHOTOS;
+    if (this.mediaIds(s.item_id, kind).length >= limit) {
+      await this.tg.send(m.chat.id, `Хватит ${limit} фото. Нажмите «Готово».`, K.photosDoneKb());
       return;
     }
     const img = await this.downloadImage(m);
@@ -433,15 +443,49 @@ export class BotDO extends DurableObject<Env> {
       await this.tg.send(m.chat.id, img);
       return;
     }
-    this.saveMedia(s.item_id, "src", img.data, img.mime);
+    this.saveMedia(s.item_id, kind, img.data, img.mime);
     if (m.media_group_id) {
       const fresh = this.q("INSERT OR IGNORE INTO seen_groups (id, created_at) VALUES (?, ?) RETURNING id", m.media_group_id, Date.now());
       if (!fresh.length) return;
       await this.tg.send(m.chat.id, "📷 Альбом получил. Ещё фото или «Готово».", K.photosDoneKb());
       return;
     }
-    const n = this.mediaIds(s.item_id, "src").length;
+    const n = this.mediaIds(s.item_id, kind).length;
     await this.tg.send(m.chat.id, `📷 Фото ${n} получил. Ещё или «Готово».`, K.photosDoneKb());
+  }
+
+  /** Свои готовые фото вместо всех: ставим как есть, без обработки. */
+  private async ownPhotosDone(chat: number, s: Session): Promise<void> {
+    const it = this.item(s.item_id);
+    if (!it) return this.startNew(chat, s);
+    const own = this.mediaIds(it.id, "own_new");
+    if (!own.length) {
+      await this.tg.send(chat, "Пришлите хотя бы одно фото.");
+      return;
+    }
+    this.q("DELETE FROM media WHERE item_id = ? AND kind = 'own'", it.id);
+    this.q("UPDATE media SET kind = 'own' WHERE item_id = ? AND kind = 'own_new'", it.id);
+    this.updateItem(it.id, { photos: own, photo_style: "own" });
+    this.setSession(s, { state: "review" });
+    await this.preview(chat, this.item(it.id)!, true);
+  }
+
+  /** Заменить одно фото объявления своим. Номер фото хранится в session.field. */
+  private async replacePhoto(m: TgMessage, s: Session): Promise<void> {
+    const it = this.item(s.item_id);
+    const index = Number(s.field);
+    if (!it || !Number.isInteger(index) || index < 0 || index >= it.photos.length) return this.startNew(m.chat.id, s);
+    const img = await this.downloadImage(m);
+    if (typeof img === "string") {
+      await this.tg.send(m.chat.id, img);
+      return;
+    }
+    const photos = [...it.photos];
+    photos[index] = this.saveMedia(it.id, "own", img.data, img.mime);
+    this.updateItem(it.id, { photos });
+    this.setSession(s, { state: "review", field: null });
+    await this.tg.send(m.chat.id, `✅ Фото ${index + 1} заменил.`);
+    await this.preview(m.chat.id, this.item(it.id)!, true);
   }
 
   private async photosDone(chat: number, s: Session): Promise<void> {
@@ -512,7 +556,7 @@ export class BotDO extends DurableObject<Env> {
     const chat = cb.message!.chat.id;
     const data = cb.data ?? "";
     const [action, a, b, c] = data.split(":");
-    const it = ["show", "edit", "ef", "em", "set", "sty", "ok", "drop", "pub", "rm"].includes(action) ? this.item(a) : null;
+    const it = ["show", "edit", "ef", "em", "set", "sty", "ok", "drop", "pub", "rm", "ph", "phn"].includes(action) ? this.item(a) : null;
 
     if (it && it.busy && action !== "show") {
       await this.tg.answer(cb.id, "Подождите, ещё работаю над этой вещью…");
@@ -540,6 +584,7 @@ export class BotDO extends DurableObject<Env> {
         return;
       case "photos_done":
         if (s.state === "photos" || s.state === "new_photos") return this.photosDone(chat, s);
+        if (s.state === "own_photos") return this.ownPhotosDone(chat, s);
         return;
       case "tag_skip":
         if (s.state === "tag") return this.askInfo(chat, s);
@@ -592,6 +637,10 @@ export class BotDO extends DurableObject<Env> {
       case "pub":
         await this.tg.removeKeyboard(chat, cb.message!.message_id);
         return this.publish(chat, s, it);
+      case "ph":
+        return this.photoAction(chat, s, it, b);
+      case "phn":
+        return this.photoByNumber(chat, s, it, b, Number(c));
       case "rm":
         this.updateItem(it.id, { status: ST.REMOVED });
         this.kvSet("feed_dirty", "1");
@@ -599,6 +648,45 @@ export class BotDO extends DurableObject<Env> {
         await this.tg.send(chat, "Убрал из файла выгрузки. Авито снимет объявление при ближайшей загрузке.");
         return;
     }
+  }
+
+  /** Кнопки «заменить одно фото», «убрать одно фото», «свои фото вместо всех». */
+  private async photoAction(chat: number, s: Session, it: Item, mode: string): Promise<void> {
+    this.setSession(s, { item_id: it.id });
+    if (mode === "own") {
+      // Новые фото копятся отдельно и заменяют текущие только по «Готово»
+      this.q("DELETE FROM media WHERE item_id = ? AND kind = 'own_new'", it.id);
+      this.setSession(s, { state: "own_photos" });
+      await this.tg.send(chat,
+        "Пришлите свои готовые фото (можно альбомом, до 10). Они встанут в объявление как есть, без обработки. Потом нажмите «Готово».",
+        K.photosDoneKb());
+      return;
+    }
+    if (!it.photos.length) {
+      await this.tg.send(chat, "В объявлении пока нет фото.");
+      return;
+    }
+    if (mode === "remove" && it.photos.length < 2) {
+      await this.tg.send(chat, "Это единственное фото — его можно только заменить.");
+      return;
+    }
+    await this.tg.sendFiles(chat, this.filesFor(it.photos), false, "Фото по порядку: 1, 2, 3…");
+    await this.tg.send(chat,
+      mode === "replace" ? "Какое фото заменить?" : "Какое фото убрать?",
+      K.photoNumbersKb(it.id, mode, it.photos.length));
+  }
+
+  private async photoByNumber(chat: number, s: Session, it: Item, mode: string, index: number): Promise<void> {
+    if (!Number.isInteger(index) || index < 0 || index >= it.photos.length) return;
+    if (mode === "remove") {
+      if (it.photos.length < 2) return;
+      this.updateItem(it.id, { photos: it.photos.filter((_, i) => i !== index) });
+      this.setSession(s, { item_id: it.id, state: "review" });
+      await this.tg.send(chat, `🗑 Фото ${index + 1} убрал.`);
+      return this.preview(chat, this.item(it.id)!, true);
+    }
+    this.setSession(s, { item_id: it.id, state: "replace_photo", field: String(index) });
+    await this.tg.send(chat, `Пришлите фото, которым заменить фото ${index + 1}. Оно встанет как есть, без обработки.`);
   }
 
   private async editMode(chat: number, s: Session, it: Item, field: string, mode: string): Promise<void> {
@@ -815,6 +903,11 @@ export class BotDO extends DurableObject<Env> {
     const studio = it.studio_id ? (this.q("SELECT media_id FROM studios WHERE id = ?", it.studio_id)[0] as Row | undefined) : undefined;
     const studioImg = studio ? this.mediaImg(String(studio.media_id)) : null;
 
+    if (style === "own") {
+      const own = this.mediaIds(it.id, "own");
+      this.updateItem(it.id, { photos: own.length ? own : srcIds });
+      return;
+    }
     this.q("DELETE FROM media WHERE item_id = ? AND kind = 'out'", it.id);
     let photos = srcIds;
 
@@ -984,4 +1077,4 @@ export class BotDO extends DurableObject<Env> {
   }
 }
 
-const PHOTO_STYLES = ["cutout", "ai_studio", "ai_model", "original"];
+const PHOTO_STYLES = ["cutout", "ai_studio", "ai_model", "original", "own"];
