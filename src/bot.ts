@@ -542,7 +542,8 @@ export class BotDO extends DurableObject<Env> {
   }
 
   private photoStyle(it: Item): string {
-    let style = it.photo_style || setting(this.env, "PHOTO_STYLE", "cutout");
+    // По умолчанию: с ключом OpenAI — фото рисует нейросеть, без ключа — бесплатная вырезка в студию
+    let style = it.photo_style || setting(this.env, "PHOTO_STYLE", hasImages(this.env) ? "ai_studio" : "cutout");
     if (!PHOTO_STYLES.includes(style)) style = "cutout";
     if (style.startsWith("ai_") && !hasImages(this.env)) style = "cutout"; // нет ключа OpenAI — бесплатная вырезка
     return style;

@@ -36,7 +36,7 @@ Telegram-бот @AvitoAIStudio_Bot на Cloudflare Workers. Сценарий: с
 | `ANTHROPIC_API_KEY` | — | ключ Claude: тексты лучше, платно |
 | `OPENAI_API_KEY` | — | ключ OpenAI: фото, нарисованные нейросетью, платно |
 | `TEXT_MODEL` | `@cf/mistralai/mistral-small-3.1-24b-instruct` | бесплатная модель Cloudflare для текстов |
-| `PHOTO_STYLE` | `cutout` | `cutout` — вырезка в студию (бесплатно), `ai_studio` / `ai_model` — нейросеть OpenAI, `original` — ваши фото без обработки. Для конкретной вещи меняется кнопкой |
+| `PHOTO_STYLE` | `ai_studio` с ключом OpenAI, иначе `cutout` | `cutout` — вырезка в студию (бесплатно), `ai_studio` / `ai_model` — нейросеть OpenAI, `original` — ваши фото без обработки. Для конкретной вещи меняется кнопкой |
 | `AI_MAX_IMAGES` | `3` | сколько фото рисовать на вещь (до 6) |
 | `IMAGE_MODEL` | `gpt-image-2.5-sunburst` | модель картинок OpenAI |
 | `IMAGE_QUALITY` | `high` | `low`, `medium`, `high` — дешевле/быстрее или лучше |
