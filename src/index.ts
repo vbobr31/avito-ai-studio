@@ -55,8 +55,10 @@ async function statusPage(env: Env, origin: string): Promise<Response> {
       items.push(mark(false, `Токен Telegram не подходит: ${esc(String(e))}. Обновите секрет <code>TELEGRAM_BOT_TOKEN</code>.`));
     }
   }
-  items.push(mark(Boolean(setting(env, "ANTHROPIC_API_KEY")), "Ключ Claude <code>ANTHROPIC_API_KEY</code> (тексты и цена)"));
-  items.push(mark(hasImages(env), "Ключ OpenAI <code>OPENAI_API_KEY</code> (фото нейросетью; без него — ваши фото как есть)"));
+  items.push(`<li>✍️ Тексты и цена: ${setting(env, "ANTHROPIC_API_KEY") ? "Claude (платно)" : "бесплатная нейросеть Cloudflare"}</li>`);
+  items.push(`<li>📸 Фото: ${hasImages(env) ? "вырезка в студию + нейросеть OpenAI по кнопке (платно)" : "вырезка вещи и постановка в студию (бесплатно)"}</li>`);
+  items.push(mark(Boolean(env.AI), "Нейросети Cloudflare подключены"));
+  items.push(mark(Boolean(env.IMAGES), "Обработка картинок Cloudflare подключена"));
   if (isAutoload(env)) {
     for (const key of ["AVITO_CLIENT_ID", "AVITO_CLIENT_SECRET", "AVITO_ADDRESS"] as const) {
       items.push(mark(Boolean(setting(env, key)), `<code>${key}</code> для автопубликации на Авито`));

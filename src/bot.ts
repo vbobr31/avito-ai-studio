@@ -5,10 +5,10 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
-import { hasImages, isAutoload, setting } from "./env";
+import { hasClaude, hasImages, isAutoload, setting } from "./env";
 import { APPAREL, CATEGORY, CONDITIONS, EDITABLE, GOODS_TYPES, Listing, MAX_IMAGES, TITLE_MAX } from "./fields";
 import { Img, makeListing, rewriteField } from "./ai";
-import { generateImage } from "./images";
+import { cutoutIntoStudio, generateImage } from "./images";
 import { Avito, buildFeed, describeStatus, fullDescription } from "./avito";
 import { Telegram, TgCallback, TgMessage, TgUpdate } from "./telegram";
 import * as K from "./keyboards";
@@ -27,6 +27,7 @@ const ST = {
 } as const;
 
 const STYLE_NAMES: Record<string, string> = {
+  cutout: "вещь вырезана и поставлена в студию",
   ai_studio: "нейросеть: вещь в студии",
   ai_model: "нейросеть: вещь на модели",
   original: "ваши фото без обработки",
@@ -487,19 +488,23 @@ export class BotDO extends DurableObject<Env> {
   }
 
   private photoStyle(it: Item): string {
-    let style = it.photo_style || setting(this.env, "PHOTO_STYLE", hasImages(this.env) ? "ai_studio" : "original");
-    if (!PROMPT_STYLES.includes(style)) style = "original";
-    if (style !== "original" && !hasImages(this.env)) style = "original";
+    let style = it.photo_style || setting(this.env, "PHOTO_STYLE", "cutout");
+    if (!PHOTO_STYLES.includes(style)) style = "cutout";
+    if (style.startsWith("ai_") && !hasImages(this.env)) style = "cutout"; // нет ключа OpenAI — бесплатная вырезка
     return style;
   }
 
   private waitText(it: Item, kind: "generate" | "photos"): string {
-    const ai = this.photoStyle(it) !== "original";
-    if (kind === "photos") return ai ? "⏳ Рисую фото нейросетью, 1–3 минуты…" : "⏳ Обновляю фото…";
-    return ai
-      ? "⏳ Рисую фото нейросетью и пишу объявление… Это займёт 1–3 минуты."
+    const style = this.photoStyle(it);
+    if (kind === "photos") {
+      return style.startsWith("ai_") ? "⏳ Рисую фото нейросетью, 1–3 минуты…" : "⏳ Обновляю фото…";
+    }
+    if (style.startsWith("ai_")) return "⏳ Рисую фото нейросетью и пишу объявление… Это займёт 1–3 минуты.";
+    return style === "cutout"
+      ? "⏳ Ставлю вещь в студию и пишу объявление… Обычно до минуты."
       : "⏳ Пишу объявление… Обычно до минуты.";
   }
+
 
   // ---------------------------------------------------------------- кнопки
 
@@ -708,6 +713,7 @@ export class BotDO extends DurableObject<Env> {
       `📏 Размер: ${esc(l.size || "—")}   ✨ Состояние: ${esc(l.condition || "—")}`,
       `🏷 Бренд: ${esc(l.brand || "—")}   🎨 Цвет: ${esc(l.color || "—")}`,
       `📸 Фото: ${STYLE_NAMES[this.photoStyle(it)] ?? ""}`,
+      `✍️ Текст: ${hasClaude(this.env) ? "Claude" : "бесплатная нейросеть Cloudflare — проверьте формулировки"}`,
       "",
     ];
     let desc = fullDescription(l, this.env);
@@ -812,7 +818,25 @@ export class BotDO extends DurableObject<Env> {
     this.q("DELETE FROM media WHERE item_id = ? AND kind = 'out'", it.id);
     let photos = srcIds;
 
-    if (style !== "original" && studioImg && srcIds.length) {
+    if (style === "cutout" && studioImg && srcIds.length) {
+      // Бесплатно: каждое фото вещи вырезаем и ставим в студию; вещь остаётся как на фото
+      const outs: string[] = [];
+      let error = "";
+      for (const [i, id] of srcIds.slice(0, MAX_IMAGES).entries()) {
+        try {
+          const out = await cutoutIntoStudio(this.env, studioImg, this.mediaImg(id)!, (it.photo_variant || 0) + i);
+          outs.push(this.saveMedia(it.id, "out", out, "image/jpeg"));
+        } catch (e) {
+          error = String(e);
+          console.warn("Вырезка", error);
+        }
+      }
+      if (outs.length) photos = outs;
+      else {
+        await this.tg.send(chat,
+          `⚠️ Не получилось поставить вещь в студию (${esc(error).slice(0, 300)}). Беру ваши исходные фото.`);
+      }
+    } else if (style.startsWith("ai_") && studioImg && srcIds.length) {
       const count = Math.min(6, Math.max(1, Number(setting(this.env, "AI_MAX_IMAGES", "3")) || 3));
       const variant = it.photo_variant || 0;
       const results = await Promise.allSettled(
@@ -960,4 +984,4 @@ export class BotDO extends DurableObject<Env> {
   }
 }
 
-const PROMPT_STYLES = ["ai_studio", "ai_model", "original"];
+const PHOTO_STYLES = ["cutout", "ai_studio", "ai_model", "original"];

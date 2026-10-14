@@ -27,12 +27,13 @@ export function editMenuKb(id: string): Keyboard {
 export function editModeKb(id: string, field: string, aiImages: boolean): Keyboard {
   const rows: Keyboard = [];
   if (field === "photos") {
+    rows.push([{ text: "🤖 Переделай сам (другой вариант)", callback_data: `em:${id}:photos:auto` }]);
+    rows.push([{ text: "✂️ Вещь в студии (вырезка, бесплатно)", callback_data: `sty:${id}:cutout` }]);
     if (aiImages) {
-      rows.push([{ text: "🤖 Переделай сам (другой вариант)", callback_data: `em:${id}:photos:auto` }]);
       rows.push([{ text: "🎨 Нейросеть: вещь в студии", callback_data: `sty:${id}:ai_studio` }]);
       rows.push([{ text: "👗 Нейросеть: вещь на модели", callback_data: `sty:${id}:ai_model` }]);
-      rows.push([{ text: "📷 Только мои фото, без нейросети", callback_data: `sty:${id}:original` }]);
     }
+    rows.push([{ text: "📷 Только мои фото, без обработки", callback_data: `sty:${id}:original` }]);
     rows.push([{ text: "📷 Пришлю новые фото товара", callback_data: `em:${id}:photos:manual` }]);
     rows.push([{ text: "📍 Другая локация студии", callback_data: `em:${id}:photos:studio` }]);
   } else {

@@ -1,6 +1,8 @@
 /**
- * Фото нейросетью OpenAI (метод images/edits): пустая студия + вещь → вещь в студии или на модели.
- * Это графика: детали могут чуть отличаться от реальных, поэтому к объявлению добавляются исходные фото.
+ * Фото вещи в студии.
+ * Бесплатно — cutoutIntoStudio: Cloudflare Images вырезает вещь и ставит на фото студии.
+ * Платно — generateImage: нейросеть OpenAI рисует вещь в студии или на модели. Это графика:
+ * детали могут чуть отличаться, поэтому к объявлению добавляются исходные фото.
  */
 import type { Env } from "./env";
 import { setting } from "./env";
@@ -99,4 +101,41 @@ export async function generateImage(env: Env, studio: Img, product: Img, style: 
   if (!b64) throw new Error("нейросеть не вернула картинку");
   const bytes = fromBase64(b64);
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+// ---------------------------------------------------------------- бесплатно: вырезка и постановка в студию
+
+/** Варианты постановки: доля высоты кадра, центр по горизонтали, центр по вертикали. */
+const CUTOUT_VARIANTS = [
+  { scale: 0.86, cx: 0.5, cy: 0.52 },
+  { scale: 0.76, cx: 0.5, cy: 0.55 },
+  { scale: 0.92, cx: 0.48, cy: 0.5 },
+  { scale: 0.8, cx: 0.53, cy: 0.53 },
+];
+
+const toStream = (data: ArrayBuffer) => new Blob([data]).stream();
+
+/**
+ * Cloudflare Images: вырезает вещь с фона (segment) и кладёт на фото пустой студии.
+ * Вещь не перерисовывается — остаётся точно такой, как на фото.
+ */
+export async function cutoutIntoStudio(env: Env, studio: Img, product: Img, variant: number): Promise<ArrayBuffer> {
+  const v = CUTOUT_VARIANTS[variant % CUTOUT_VARIANTS.length];
+  const s = imageSize(studio.data) ?? { width: 1200, height: 1600 };
+  const p = imageSize(product.data) ?? { width: 1000, height: 1000 };
+
+  const W = Math.min(s.width, 1600);
+  const H = Math.round((s.height * W) / s.width);
+  const ratio = Math.min((W * 0.9) / p.width, (H * v.scale) / p.height);
+  const ow = Math.max(1, Math.round(p.width * ratio));
+  const oh = Math.max(1, Math.round(p.height * ratio));
+  const left = Math.max(0, Math.min(W - ow, Math.round(W * v.cx - ow / 2)));
+  const top = Math.max(0, Math.min(H - oh, Math.round(H * v.cy - oh / 2)));
+
+  const overlay = env.IMAGES.input(toStream(product.data)).transform({ segment: "foreground", width: ow, height: oh, fit: "contain" });
+  const result = await env.IMAGES.input(toStream(studio.data))
+    .transform({ width: W, height: H, fit: "cover" })
+    .draw(overlay, { top, left })
+    .output({ format: "image/jpeg", quality: 90 });
+  return await result.response().arrayBuffer();
 }
