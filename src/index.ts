@@ -12,6 +12,7 @@ import type { Env } from "./env";
 import { hasImages, isAutoload, setting } from "./env";
 import { Telegram, TgUpdate } from "./telegram";
 import { esc, sha256hex } from "./util";
+import { applyProfile } from "./profile";
 
 export { BotDO } from "./bot";
 
@@ -86,19 +87,11 @@ async function setup(env: Env, origin: string): Promise<Response> {
       drop_pending_updates: true,
       max_connections: 10,
     });
-    await tg.call("setMyCommands", {
-      commands: [
-        { command: "new", description: "Новая вещь" },
-        { command: "list", description: "Мои объявления" },
-        { command: "studios", description: "Локации студии" },
-        { command: "feed", description: "Ссылка на фид для Авито" },
-        { command: "cancel", description: "Отменить текущую вещь" },
-        { command: "help", description: "Помощь" },
-      ],
-    });
+    const profile = await applyProfile(tg);
     const me = await tg.call<{ username: string }>("getMe");
     return page("Бот подключён",
       `<p class=ok>✅ @${esc(me.username)} теперь работает через этот Worker.</p>` +
+      `<ul>${profile.map((line) => `<li>${esc(line)}</li>`).join("")}</ul>` +
       `<p>Откройте бота в Telegram и отправьте <code>/start</code>. Первый, кто напишет, станет владельцем.</p>` +
       `<p><a href="/">Проверить настройки</a></p>`);
   } catch (e) {

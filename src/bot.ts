@@ -13,6 +13,7 @@ import { Avito, buildFeed, describeStatus, fullDescription } from "./avito";
 import { Telegram, TgCallback, TgMessage, TgUpdate } from "./telegram";
 import * as K from "./keyboards";
 import { detectMime, esc, formatPrice, newId } from "./util";
+import { HELP_TEXT, MENU, MENU_KEYBOARD, welcomeText } from "./profile";
 
 type Row = Record<string, unknown>;
 
@@ -270,10 +271,22 @@ export class BotDO extends DurableObject<Env> {
     const chat = m.chat.id;
     const text = (m.text ?? "").trim();
 
+    // Кнопки главного меню внизу чата
+    if (text === MENU.NEW) return this.startNew(chat, s);
+    if (text === MENU.LIST) return this.listItems(chat);
+    if (text === MENU.STUDIOS) return this.listStudios(chat);
+    if (text === MENU.HELP) {
+      await this.tg.send(chat, HELP_TEXT, undefined, { reply_markup: MENU_KEYBOARD });
+      return;
+    }
+
     if (text.startsWith("/")) {
       const [cmd, ...args] = text.split(/\s+/);
       switch (cmd.split("@")[0]) {
         case "/start":
+          this.setSession(s, { state: "idle", field: null, relocate: 0 });
+          await this.tg.send(chat, welcomeText(this.env), undefined, { reply_markup: MENU_KEYBOARD });
+          return;
         case "/new":
           return this.startNew(chat, s);
         case "/cancel":
@@ -291,9 +304,7 @@ export class BotDO extends DurableObject<Env> {
           return this.addUser(chat, args[0]);
         case "/help":
         default:
-          await this.tg.send(chat,
-            "/new — новая вещь\n/list — мои объявления\n/studios — локации студии\n/feed — ссылка на фид для Авито\n" +
-            "/cancel — отменить текущую вещь\n/adduser ID — дать доступ коллеге\n/id — мой Telegram ID");
+          await this.tg.send(chat, HELP_TEXT, undefined, { reply_markup: MENU_KEYBOARD });
           return;
       }
     }
@@ -341,7 +352,8 @@ export class BotDO extends DurableObject<Env> {
       own_photos: "Пришлите свои готовые фото или нажмите «Готово».",
       replace_photo: "Пришлите одно фото, которым заменить выбранное.",
     };
-    await this.tg.send(chat, hints[s.state] ?? "Новая вещь — /new, список — /list, помощь — /help");
+    await this.tg.send(chat, hints[s.state] ?? "Выберите действие в меню ниже 👇", undefined,
+      hints[s.state] ? {} : { reply_markup: MENU_KEYBOARD });
   }
 
   private async downloadImage(m: TgMessage): Promise<Img | string> {
@@ -374,9 +386,7 @@ export class BotDO extends DurableObject<Env> {
     this.q("INSERT INTO items (id, user_id, chat_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", id, s.user_id, chat, ST.DRAFT, now, now);
     this.setSession(s, { chat_id: chat, state: "studio", item_id: id, field: null, relocate: 0 });
     const studios = this.studios();
-    let text =
-      "👋 Привет! Я готовлю объявления для Авито: делаю фото вещи в вашей студии, пишу заголовок и описание, " +
-      "предлагаю цену и после вашего согласования публикую.\n\n<b>Шаг 1 из 4. Студия.</b>\n";
+    let text = "📸 <b>Новое объявление</b>\n\n<b>Шаг 1 из 4. Студия.</b>\n";
     text += studios.length
       ? "Выберите локацию или пришлите фото новой (пустая студия, без вещей)."
       : "Пришлите фото студии — пустую локацию, где будет «стоять» вещь.";
